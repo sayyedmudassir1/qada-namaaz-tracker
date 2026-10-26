@@ -1,16 +1,13 @@
+
 "use client";
 
-import {
-    useCallback,
-    useEffect,
-    useMemo,
-    useRef,
-    useState,
-} from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
 
-const prayers = [
+const supabaseClient = createClient();
+
+const PRAYERS = [
     { key: "fajr", label: "Fajr", arabic: "الفجر" },
     { key: "zohar", label: "Zohar", arabic: "الظهر" },
     { key: "asr", label: "Asr", arabic: "العصر" },
@@ -19,7 +16,7 @@ const prayers = [
     { key: "witr", label: "Witr", arabic: "الوتر" },
 ] as const;
 
-type PrayerKey = (typeof prayers)[number]["key"];
+type PrayerKey = (typeof PRAYERS)[number]["key"];
 type ViewMode = "monthly" | "yearly" | "qada";
 
 type DailyCheck = {
@@ -33,729 +30,556 @@ type QadaRecord = {
     user_id: string;
 } & Record<PrayerKey, number>;
 
-type DailyRowMap = Record<string, DailyCheck>;
+type DailyRows = Record<string, DailyCheck>;
 
-const MONTHS = Array.from({ length: 12 }, (_, index) =>
-    new Date(2024, index, 1).toLocaleDateString("en-US", {
-        month: "long",
-    }),
+const MONTHS = Array.from({ length: 12 }, (_, i) =>
+    new Date(2024, i, 1).toLocaleString("en-US", { month: "long" })
 );
 
-const YEAR_OPTIONS = Array.from(
+const YEARS = Array.from(
     { length: 101 },
-    (_, index) => new Date().getFullYear() - 80 + index,
+    (_, i) => new Date().getFullYear() - 80 + i
 );
 
-function localDate(year: number, month: number, day: number) {
-    return [
-        year,
-        String(month + 1).padStart(2, "0"),
-        String(day).padStart(2, "0"),
-    ].join("-");
-}
+const cx = (...classes: (string | false | undefined)[]) =>
+    classes.filter(Boolean).join(" ");
 
-function getToday() {
-    const now = new Date();
-    return localDate(now.getFullYear(), now.getMonth(), now.getDate());
-}
+const dateKey = (date: Date) =>
+    `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 
-function emptyDay(userId: string, date: string): DailyCheck {
-    return {
+const dayDate = (year: number, month: number, day: number) =>
+    dateKey(new Date(year, month, day));
+
+const dayCount = (year: number, month: number) =>
+    new Date(year, month + 1, 0).getDate();
+
+const emptyDay = (userId: string, date: string): DailyCheck =>
+    ({
         user_id: userId,
         day_date: date,
-        fajr: false,
-        zohar: false,
-        asr: false,
-        magrib: false,
-        isha: false,
-        witr: false,
-    };
-}
+        ...Object.fromEntries(PRAYERS.map(({ key }) => [key, false])),
+    }) as DailyCheck;
 
-function emptyQada(userId: string): QadaRecord {
-    return {
+const emptyQada = (userId: string): QadaRecord =>
+    ({
         user_id: userId,
-        fajr: 0,
-        zohar: 0,
-        asr: 0,
-        magrib: 0,
-        isha: 0,
-        witr: 0,
-    };
-}
+        ...Object.fromEntries(PRAYERS.map(({ key }) => [key, 0])),
+    }) as QadaRecord;
 
-function completedCount(row?: DailyCheck) {
-    if (!row) return 0;
-    return prayers.reduce(
-        (total, prayer) => total + (row[prayer.key] ? 1 : 0),
-        0,
-    );
-}
+const countPrayers = (row?: DailyCheck) =>
+    row ? PRAYERS.filter(({ key }) => row[key]).length : 0;
 
-function getErrorMessage(error: unknown) {
-    return error instanceof Error
-        ? error.message
-        : "An unexpected error occurred.";
-}
-
-function ProgressBar({
-    value,
-    color = "emerald",
-}: {
+function Progress({ value, rose = false }: {
     value: number;
-    color?: "emerald" | "rose";
+    rose?: boolean;
 }) {
-    const safeValue = Math.max(0, Math.min(100, value));
+    const percentage = Math.max(0, Math.min(100, value));
 
     return (
         <div
-            className="h-2.5 w-full overflow-hidden rounded-full bg-slate-100"
             role="progressbar"
-            aria-label="Completion rate"
+            aria-valuenow={percentage}
             aria-valuemin={0}
             aria-valuemax={100}
-            aria-valuenow={safeValue}
+            className="h-2.5 w-full overflow-hidden rounded-full bg-slate-100"
         >
             <div
-                className={`h-full rounded-full transition-[width] duration-300 ${color === "rose"
-                    ? "bg-rose-500"
-                    : "bg-linear-to-r from-emerald-500 to-teal-500"
-                    }`}
-                style={{ width: `${safeValue}%` }}
+                className={cx(
+                    "h-full rounded-full transition-[width]",
+                    rose ? "bg-rose-500" : "bg-emerald-500"
+                )}
+                style={{ width: `${percentage}%` }}
             />
         </div>
     );
 }
 
-function LoadingState({ message }: { message: string }) {
+function Loading({ message }: { message: string }) {
     return (
-        <div className="flex min-h-48 flex-col items-center justify-center gap-3 py-12 text-center">
-            <div
-                className="h-8 w-8 animate-spin rounded-full border-4 border-emerald-100 border-t-emerald-600"
-                aria-hidden="true"
-            />
-            <p className="text-sm font-medium text-slate-500">{message}</p>
+        <div className="flex min-h-48 flex-col items-center justify-center gap-3 py-12">
+            <div className="h-8 w-8 animate-spin rounded-full border-4 border-emerald-100 border-t-emerald-600" />
+            <p className="text-sm text-slate-500">{message}</p>
         </div>
     );
 }
 
-function SectionHeading({
-    title,
-    description,
-}: {
+function Heading({ title, description }: {
     title: string;
     description: string;
 }) {
     return (
         <div>
-            <h2 className="text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">
+            <h2 className="text-xl font-bold text-slate-900 sm:text-2xl">
                 {title}
             </h2>
-            <p className="mt-1 text-sm leading-6 text-slate-500">{description}</p>
+            <p className="mt-1 text-sm leading-6 text-slate-500">
+                {description}
+            </p>
         </div>
     );
 }
 
-function StatCard({
-    label,
-    value,
-    description,
-    tone = "emerald",
-}: {
+function Stat({ label, value, description, rose = false }: {
     label: string;
     value: string;
     description: string;
-    tone?: "emerald" | "rose";
+    rose?: boolean;
 }) {
     return (
-        <div
-            className={`min-w-0 rounded-2xl border p-4 sm:p-5 ${tone === "rose"
-                ? "border-rose-100 bg-rose-50/70"
-                : "border-emerald-100 bg-emerald-50/70"
-                }`}
-        >
-            <p
-                className={`text-xs font-bold uppercase tracking-wider ${tone === "rose" ? "text-rose-700" : "text-emerald-700"
-                    }`}
-            >
+        <div className={cx(
+            "min-w-0 rounded-2xl border p-4 sm:p-5",
+            rose ? "border-rose-100 bg-rose-50/70" : "border-emerald-100 bg-emerald-50/70"
+        )}>
+            <p className={cx(
+                "text-xs font-bold uppercase tracking-wider",
+                rose ? "text-rose-700" : "text-emerald-700"
+            )}>
                 {label}
             </p>
-            <p className="mt-2 wrap-break-word text-lg font-bold text-slate-900 sm:text-xl">
-                {value}
-            </p>
+            <p className="mt-2 text-xl font-bold text-slate-900">{value}</p>
             <p className="mt-1 text-xs leading-5 text-slate-600">{description}</p>
         </div>
     );
 }
 
-function PrayerToggle({
-    prayer,
-    checked,
-    disabled,
-    onChange,
-}: {
-    prayer: (typeof prayers)[number];
-    checked: boolean;
-    disabled: boolean;
-    onChange: (checked: boolean) => void;
-}) {
-    return (
-        <label
-            className={`flex min-h-12 items-center gap-3 rounded-xl border px-3 py-2.5 transition-colors sm:min-h-11 ${checked
-                ? "border-emerald-200 bg-emerald-50"
-                : "border-slate-200 bg-white hover:border-emerald-200"
-                } ${disabled ? "cursor-wait opacity-60" : "cursor-pointer"}`}
-        >
-            <input
-                type="checkbox"
-                checked={checked}
-                disabled={disabled}
-                onChange={(event) => onChange(event.target.checked)}
-                aria-label={`${prayer.label} prayer`}
-                className="h-5 w-5 shrink-0 cursor-pointer rounded border-slate-300 accent-emerald-600 focus:ring-emerald-500"
-            />
-            <span className="min-w-0 flex-1 text-sm font-semibold text-slate-800">
-                {prayer.label}
-            </span>
-            <span
-                lang="ar"
-                dir="rtl"
-                className="shrink-0 text-sm text-emerald-700"
-            >
-                {prayer.arabic}
-            </span>
-        </label>
-    );
-}
-
 export default function PrayerTracker() {
     const router = useRouter();
-    const [supabase] = useState(() => createClient());
+    const [supabase] = useState(() => supabaseClient);
 
     const [userId, setUserId] = useState("");
     const [month, setMonth] = useState<Date | null>(null);
-    const [today, setToday] = useState("");
-    const [viewMode, setViewMode] = useState<ViewMode>("monthly");
+    const [today, setToday] = useState(dateKey(new Date()));
+    const [view, setView] = useState<ViewMode>("monthly");
 
-    const [rows, setRows] = useState<DailyRowMap>({});
-    const [yearlyRows, setYearlyRows] = useState<DailyRowMap>({});
-    const [qadaData, setQadaData] = useState<QadaRecord | null>(null);
+    const [rows, setRows] = useState<DailyRows>({});
+    const [yearRows, setYearRows] = useState<DailyRows>({});
+    const [qada, setQada] = useState<QadaRecord | null>(null);
 
     const [authLoading, setAuthLoading] = useState(true);
     const [loading, setLoading] = useState(true);
-    const [yearlyLoading, setYearlyLoading] = useState(false);
+    const [yearLoading, setYearLoading] = useState(false);
     const [qadaLoading, setQadaLoading] = useState(false);
 
     const [saving, setSaving] = useState<Record<string, boolean>>({});
-    const [bulkActionLoading, setBulkActionLoading] = useState(false);
+    const [bulkLoading, setBulkLoading] = useState(false);
     const [qadaSaving, setQadaSaving] = useState(false);
     const [error, setError] = useState("");
 
-    const monthRequestRef = useRef(0);
-    const yearRequestRef = useRef(0);
-    const qadaRequestRef = useRef(0);
-    const rowMutationRef = useRef<Record<string, number>>({});
-    const qadaMutationRef = useRef(0);
-    const bulkMutationRef = useRef(0);
-
-    useEffect(() => {
-        const now = new Date();
-
-        setMonth(new Date(now.getFullYear(), now.getMonth(), 1));
-        setToday(getToday());
-
-        const refreshToday = () => setToday(getToday());
-        window.addEventListener("focus", refreshToday);
-
-        return () => {
-            window.removeEventListener("focus", refreshToday);
-        };
-    }, []);
-
     const year = month?.getFullYear() ?? new Date().getFullYear();
     const monthIndex = month?.getMonth() ?? new Date().getMonth();
-    const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+    const days = dayCount(year, monthIndex);
 
+    // Authenticate the user.
     useEffect(() => {
         let active = true;
 
         async function authenticate() {
-            setAuthLoading(true);
-
-            const {
-                data: { user },
-                error: authError,
-            } = await supabase.auth.getUser();
+            const { data, error } = await supabase.auth.getUser();
 
             if (!active) return;
 
-            if (authError || !user) {
+            if (error || !data.user) {
                 router.replace("/login");
                 return;
             }
 
-            setUserId(user.id);
+            setUserId(data.user.id);
+            setMonth(new Date(new Date().getFullYear(), new Date().getMonth(), 1));
             setAuthLoading(false);
         }
 
+        const refreshToday = () => setToday(dateKey(new Date()));
+
+        window.addEventListener("focus", refreshToday);
         void authenticate();
 
         return () => {
             active = false;
+            window.removeEventListener("focus", refreshToday);
         };
     }, [router, supabase]);
 
-    const loadMonth = useCallback(async () => {
-        if (!month || !userId) return;
-
-        const requestId = ++monthRequestRef.current;
-        const start = localDate(year, monthIndex, 1);
-        const end = localDate(year, monthIndex, daysInMonth);
-
-        setLoading(true);
-        setError("");
-
-        const { data, error: queryError } = await supabase
-            .from("daily_checks")
-            .select("*")
-            .eq("user_id", userId)
-            .gte("day_date", start)
-            .lte("day_date", end)
-            .order("day_date");
-
-        if (requestId !== monthRequestRef.current) return;
-
-        if (queryError) {
-            setError(queryError.message);
-            setLoading(false);
-            return;
-        }
-
-        const nextRows: DailyRowMap = {};
-        for (const row of (data ?? []) as DailyCheck[]) {
-            nextRows[row.day_date] = row;
-        }
-
-        setRows(nextRows);
-        setLoading(false);
-    }, [supabase, userId, month, year, monthIndex, daysInMonth]);
-
-    const loadYear = useCallback(async () => {
-        if (!userId) return;
-
-        const requestId = ++yearRequestRef.current;
-        setYearlyLoading(true);
-
-        const { data, error: queryError } = await supabase
-            .from("daily_checks")
-            .select("*")
-            .eq("user_id", userId)
-            .gte("day_date", `${year}-01-01`)
-            .lte("day_date", `${year}-12-31`)
-            .order("day_date");
-
-        if (requestId !== yearRequestRef.current) return;
-
-        if (queryError) {
-            setError(queryError.message);
-        } else {
-            const nextRows: DailyRowMap = {};
-            for (const row of (data ?? []) as DailyCheck[]) {
-                nextRows[row.day_date] = row;
-            }
-            setYearlyRows(nextRows);
-        }
-
-        setYearlyLoading(false);
-    }, [supabase, userId, year]);
-
-    const loadQada = useCallback(async () => {
-        if (!userId) return;
-
-        const requestId = ++qadaRequestRef.current;
-        setQadaLoading(true);
-
-        const { data, error: queryError } = await supabase
-            .from("qada_backlog")
-            .select("*")
-            .eq("user_id", userId)
-            .maybeSingle();
-
-        if (requestId !== qadaRequestRef.current) return;
-
-        if (queryError) {
-            setError(queryError.message);
-            setQadaLoading(false);
-            return;
-        }
-
-        if (data) {
-            setQadaData(data as QadaRecord);
-            setQadaLoading(false);
-            return;
-        }
-
-        const initialQada = emptyQada(userId);
-        const { data: inserted, error: insertError } = await supabase
-            .from("qada_backlog")
-            .upsert(initialQada, { onConflict: "user_id" })
-            .select()
-            .single();
-
-        if (requestId !== qadaRequestRef.current) return;
-
-        if (insertError) {
-            setError(insertError.message);
-        } else if (inserted) {
-            setQadaData(inserted as QadaRecord);
-        }
-
-        setQadaLoading(false);
-    }, [supabase, userId]);
-
+    // Load monthly records.
     useEffect(() => {
         if (!userId || !month) return;
 
-        void loadMonth();
-        return () => {
-            monthRequestRef.current++;
-        };
-    }, [userId, month, loadMonth]);
-
-    useEffect(() => {
-        if (!userId || viewMode !== "yearly") return;
-
-        void loadYear();
-        return () => {
-            yearRequestRef.current++;
-        };
-    }, [userId, viewMode, loadYear]);
-
-    useEffect(() => {
-        if (!userId || viewMode !== "qada") return;
-
-        void loadQada();
-        return () => {
-            qadaRequestRef.current++;
-        };
-    }, [userId, viewMode, loadQada]);
-
-    const togglePrayer = useCallback(
-        async (date: string, prayer: PrayerKey, checked: boolean) => {
-            if (!userId || saving[date] || bulkActionLoading) return;
-
-            const previous = rows[date] ?? emptyDay(userId, date);
-            const updated = { ...previous, [prayer]: checked };
-            const mutationId = (rowMutationRef.current[date] ?? 0) + 1;
-
-            rowMutationRef.current[date] = mutationId;
-            setRows((current) => ({ ...current, [date]: updated }));
-            setSaving((current) => ({ ...current, [date]: true }));
-            setError("");
-
-            const { error: saveError } = await supabase
-                .from("daily_checks")
-                .upsert(updated, { onConflict: "user_id,day_date" });
-
-            if (rowMutationRef.current[date] !== mutationId) return;
-
-            if (saveError) {
-                setRows((current) => {
-                    const restored = { ...current };
-
-                    if (previous.id || Object.hasOwn(current, date)) {
-                        restored[date] = previous;
-                    } else {
-                        delete restored[date];
-                    }
-
-                    return restored;
-                });
-
-                setError(`Could not save ${date}: ${saveError.message}`);
-            }
-
-            setSaving((current) => {
-                const next = { ...current };
-                delete next[date];
-                return next;
-            });
-        },
-        [userId, saving, bulkActionLoading, rows, supabase],
-    );
-
-    const handleBulkAction = useCallback(
-        async (completedStatus: boolean) => {
-            if (!userId || bulkActionLoading) return;
-
-            const mutationId = ++bulkMutationRef.current;
-            const previousRows = { ...rows };
-            const updatedRows: DailyRowMap = {};
-            const bulkPayload: DailyCheck[] = [];
-
-            setBulkActionLoading(true);
-            setError("");
-
-            for (let day = 1; day <= daysInMonth; day++) {
-                const date = localDate(year, monthIndex, day);
-                const existing = rows[date] ?? emptyDay(userId, date);
-
-                const updated: DailyCheck = {
-                    ...existing,
-                    fajr: completedStatus,
-                    zohar: completedStatus,
-                    asr: completedStatus,
-                    magrib: completedStatus,
-                    isha: completedStatus,
-                    witr: completedStatus,
-                };
-
-                updatedRows[date] = updated;
-                bulkPayload.push(updated);
-            }
-
-            for (const date of Object.keys(updatedRows)) {
-                rowMutationRef.current[date] =
-                    (rowMutationRef.current[date] ?? 0) + 1;
-            }
-
-            setSaving({});
-            setRows((current) => ({ ...current, ...updatedRows }));
-
-            const { error: saveError } = await supabase
-                .from("daily_checks")
-                .upsert(bulkPayload, { onConflict: "user_id,day_date" });
-
-            if (bulkMutationRef.current !== mutationId) return;
-
-            if (saveError) {
-                setRows(previousRows);
-                setError(`Could not update month: ${saveError.message}`);
-            }
-
-            setBulkActionLoading(false);
-        },
-        [
-            userId,
-            bulkActionLoading,
-            rows,
-            daysInMonth,
-            year,
-            monthIndex,
-            supabase,
-        ],
-    );
-
-    const updateQadaCount = useCallback(
-        async (prayerKey: PrayerKey, delta: number) => {
-            if (!userId || !qadaData || qadaSaving) return;
-
-            const previous = qadaData;
-            const updated = {
-                ...previous,
-                [prayerKey]: Math.max(0, previous[prayerKey] + delta),
-            };
-
-            const mutationId = ++qadaMutationRef.current;
-
-            setQadaData(updated);
-            setQadaSaving(true);
-            setError("");
-
-            const { error: saveError } = await supabase
-                .from("qada_backlog")
-                .upsert(updated, { onConflict: "user_id" });
-
-            if (qadaMutationRef.current !== mutationId) return;
-
-            if (saveError) {
-                setQadaData(previous);
-                setError(`Could not update Qada count: ${saveError.message}`);
-            }
-
-            setQadaSaving(false);
-        },
-        [userId, qadaData, qadaSaving, supabase],
-    );
-
-    const signOut = useCallback(async () => {
+        let active = true;
+        setLoading(true);
         setError("");
 
-        const { error: signOutError } = await supabase.auth.signOut();
+        async function load() {
+            const { data, error } = await supabase
+                .from("daily_checks")
+                .select("*")
+                .eq("user_id", userId)
+                .gte("day_date", dayDate(year, monthIndex, 1))
+                .lte("day_date", dayDate(year, monthIndex, days))
+                .order("day_date");
 
-        if (signOutError) {
-            setError(signOutError.message);
+            if (!active) return;
+
+            if (error) {
+                setError(error.message);
+            } else {
+                setRows(Object.fromEntries(
+                    (data as DailyCheck[]).map(row => [row.day_date, row])
+                ));
+            }
+
+            setLoading(false);
+        }
+
+        void load();
+        return () => { active = false; };
+    }, [supabase, userId, year, monthIndex, days, month]);
+
+    // Load yearly records.
+    useEffect(() => {
+        if (!userId || view !== "yearly") return;
+
+        let active = true;
+        setYearLoading(true);
+
+        async function load() {
+            const { data, error } = await supabase
+                .from("daily_checks")
+                .select("*")
+                .eq("user_id", userId)
+                .gte("day_date", `${year}-01-01`)
+                .lte("day_date", `${year}-12-31`)
+                .order("day_date");
+
+            if (!active) return;
+
+            if (error) {
+                setError(error.message);
+            } else {
+                setYearRows(Object.fromEntries(
+                    (data as DailyCheck[]).map(row => [row.day_date, row])
+                ));
+            }
+
+            setYearLoading(false);
+        }
+
+        void load();
+        return () => { active = false; };
+    }, [supabase, userId, year, view]);
+
+    // Load or create the Qada record.
+    useEffect(() => {
+        if (!userId || view !== "qada") return;
+
+        let active = true;
+        setQadaLoading(true);
+
+        async function load() {
+            const { data, error } = await supabase
+                .from("qada_backlog")
+                .select("*")
+                .eq("user_id", userId)
+                .maybeSingle();
+
+            if (!active) return;
+
+            if (error) {
+                setError(error.message);
+                setQadaLoading(false);
+                return;
+            }
+
+            if (data) {
+                setQada(data as QadaRecord);
+                setQadaLoading(false);
+                return;
+            }
+
+            const { data: inserted, error: insertError } = await supabase
+                .from("qada_backlog")
+                .upsert(emptyQada(userId), { onConflict: "user_id" })
+                .select()
+                .single();
+
+            if (!active) return;
+
+            if (insertError) setError(insertError.message);
+            else setQada(inserted as QadaRecord);
+
+            setQadaLoading(false);
+        }
+
+        void load();
+        return () => { active = false; };
+    }, [supabase, userId, view]);
+
+    // Update an individual prayer.
+
+    async function togglePrayer(
+        date: string,
+        prayer: PrayerKey,
+        checked: boolean
+    ) {
+        if (!userId || saving[date] || bulkLoading) return;
+
+        const previous = rows[date];
+
+        const updated: DailyCheck = {
+            ...(previous ?? emptyDay(userId, date)),
+            [prayer]: checked,
+        };
+
+        // Update the UI immediately.
+        setRows(current => ({ ...current, [date]: updated }));
+        setSaving(current => ({ ...current, [date]: true }));
+        setError("");
+
+        // Exclude database-generated columns from the payload.
+        const {
+            id: _id,
+            day: _day,
+            ...recordToSave
+        } = updated as DailyCheck & { day?: number };
+
+        const { error } = await supabase
+            .from("daily_checks")
+            .upsert(recordToSave, {
+                onConflict: "user_id,day_date",
+            });
+
+        if (error) {
+            setRows(current => {
+                const next = { ...current };
+
+                if (previous) {
+                    next[date] = previous;
+                } else {
+                    delete next[date];
+                }
+
+                return next;
+            });
+
+            setError(`Could not save ${date}: ${error.message}`);
+        }
+
+        setSaving(current => {
+            const next = { ...current };
+            delete next[date];
+            return next;
+        });
+    }
+
+
+    // Mark or clear all prayers in the selected month.
+    async function updateMonth(completed: boolean) {
+        if (!userId || bulkLoading) return;
+
+        setBulkLoading(true);
+        setError("");
+
+        const previous = rows;
+        const updated: DailyRows = {};
+
+        for (let day = 1; day <= days; day++) {
+            const date = dayDate(year, monthIndex, day);
+
+            updated[date] = {
+                ...(rows[date] ?? emptyDay(userId, date)),
+                ...Object.fromEntries(
+                    PRAYERS.map(({ key }) => [key, completed])
+                ),
+            } as DailyCheck;
+        }
+
+        setRows(current => ({ ...current, ...updated }));
+
+
+
+        const recordsToSave = Object.values(updated).map(
+            (row) => {
+                const {
+                    id: _id,
+                    day: _day,
+                    ...record
+                } = row as DailyCheck & { day?: number };
+
+                return record;
+            }
+        );
+
+        const { error } = await supabase
+            .from("daily_checks")
+            .upsert(recordsToSave, {
+                onConflict: "user_id,day_date",
+            });
+
+        if (error) {
+            setRows(previous);
+            setError(`Could not update month: ${error.message}`);
+        }
+
+        setBulkLoading(false);
+
+    }
+
+    // Update the Qada count.
+    async function updateQada(prayer: PrayerKey, delta: number) {
+        if (!userId || !qada || qadaSaving) return;
+
+        const previous = qada;
+        const updated = {
+            ...qada,
+            [prayer]: Math.max(0, qada[prayer] + delta),
+        };
+
+        setQada(updated);
+        setQadaSaving(true);
+        setError("");
+
+        const { error } = await supabase
+            .from("qada_backlog")
+            .upsert(updated, { onConflict: "user_id" });
+
+        if (error) {
+            setQada(previous);
+            setError(`Could not update Qada count: ${error.message}`);
+        }
+
+        setQadaSaving(false);
+    }
+
+    // Sign out.
+    async function signOut() {
+        setError("");
+
+        const { error } = await supabase.auth.signOut();
+
+        if (error) {
+            setError(error.message);
             return;
         }
 
         router.replace("/login");
         router.refresh();
-    }, [supabase, router]);
+    }
 
-    const totalQadaCount = useMemo(
-        () =>
-            qadaData
-                ? prayers.reduce((total, prayer) => total + qadaData[prayer.key], 0)
-                : 0,
-        [qadaData],
-    );
+    // Calculate monthly and yearly statistics.
+    function getStats(
+        source: DailyRows,
+        selectedYear: number,
+        selectedMonth?: number
+    ) {
+        const now = new Date();
+        const currentDate = dateKey(now);
+        const firstMonth = selectedMonth ?? 0;
+        const lastMonth = selectedMonth ?? 11;
 
-    const monthlyStats = useMemo(() => {
-        const currentYear = Number(today.slice(0, 4));
-        const currentMonth = Number(today.slice(5, 7)) - 1;
-        const currentDay = Number(today.slice(8, 10));
+        return Array.from(
+            { length: lastMonth - firstMonth + 1 },
+            (_, index) => {
+                const m = firstMonth + index;
+                const totalDays = dayCount(selectedYear, m);
+                const lastDate = dayDate(selectedYear, m, totalDays);
 
-        const daysToCount =
-            year === currentYear && monthIndex === currentMonth
-                ? currentDay
-                : year < currentYear ||
-                    (year === currentYear && monthIndex < currentMonth)
-                    ? daysInMonth
-                    : 0;
+                const elapsedDays = lastDate < currentDate
+                    ? totalDays
+                    : selectedYear === now.getFullYear() && m === now.getMonth()
+                        ? now.getDate()
+                        : lastDate >= currentDate ? 0 : totalDays;
 
-        let totalChecked = 0;
+                const counts = PRAYERS.map(({ key }) => {
+                    let count = 0;
 
-        for (let day = 1; day <= daysToCount; day++) {
-            totalChecked += completedCount(rows[localDate(year, monthIndex, day)]);
-        }
+                    for (let d = 1; d <= elapsedDays; d++) {
+                        if (source[dayDate(selectedYear, m, d)]?.[key]) count++;
+                    }
 
-        const totalPossible = daysToCount * prayers.length;
+                    return count;
+                });
 
-        const prayerStats = prayers.map((prayer) => {
-            let count = 0;
-
-            for (let day = 1; day <= daysToCount; day++) {
-                if (rows[localDate(year, monthIndex, day)]?.[prayer.key]) count++;
-            }
-
-            return {
-                ...prayer,
-                count,
-                pct: daysToCount ? Math.round((count / daysToCount) * 100) : 0,
-            };
-        });
-
-        const sorted = [...prayerStats].sort((a, b) => a.pct - b.pct);
-
-        return {
-            daysToCount,
-            totalChecked,
-            totalPossible,
-            percentage: totalPossible
-                ? Math.round((totalChecked / totalPossible) * 100)
-                : 0,
-            prayerStats,
-            mostMissed: sorted[0],
-            mostCompleted: sorted[sorted.length - 1],
-        };
-    }, [rows, year, monthIndex, daysInMonth, today]);
-
-    const yearlyStats = useMemo(
-        () =>
-            Array.from({ length: 12 }, (_, monthNumber) => {
-                const monthDays = new Date(year, monthNumber + 1, 0).getDate();
-                const currentYear = Number(today.slice(0, 4));
-                const currentMonth = Number(today.slice(5, 7)) - 1;
-                const currentDay = Number(today.slice(8, 10));
-
-                const daysToCount =
-                    year < currentYear
-                        ? monthDays
-                        : year > currentYear
-                            ? 0
-                            : monthNumber < currentMonth
-                                ? monthDays
-                                : monthNumber === currentMonth
-                                    ? currentDay
-                                    : 0;
-
-                let checked = 0;
-
-                for (let day = 1; day <= daysToCount; day++) {
-                    checked += completedCount(
-                        yearlyRows[localDate(year, monthNumber, day)],
-                    );
-                }
-
-                const possible = daysToCount * prayers.length;
+                const checked = counts.reduce((sum, count) => sum + count, 0);
+                const possible = elapsedDays * PRAYERS.length;
 
                 return {
-                    monthNumber,
-                    name: MONTHS[monthNumber],
+                    month: m,
+                    name: MONTHS[m],
                     checked,
                     possible,
-                    percentage: possible ? Math.round((checked / possible) * 100) : 0,
+                    percentage: possible
+                        ? Math.round(checked / possible * 100)
+                        : 0,
+                    counts,
+                    elapsedDays,
                 };
-            }),
-        [yearlyRows, year, today],
-    );
+            }
+        );
+    }
 
-    const changeMonth = (offset: number) => {
-        setMonth(new Date(year, monthIndex + offset, 1));
-    };
+    const monthly = getStats(rows, year, monthIndex)[0];
+    const yearly = getStats(yearRows, year);
+    const totalQada = qada
+        ? PRAYERS.reduce((sum, { key }) => sum + qada[key], 0)
+        : 0;
+
 
     if (authLoading || !month) {
         return (
-            <main className="mx-auto min-h-screen max-w-6xl px-4 py-10 sm:px-6">
-                <LoadingState message="Preparing your prayer tracker..." />
+            <main className="mx-auto max-w-6xl px-4 py-10">
+                <Loading message="Preparing your prayer tracker..." />
             </main>
         );
     }
 
     return (
-        <main className="mx-auto min-h-screen w-full max-w-6xl px-3 py-5 font-sans text-slate-800 antialiased sm:px-6 sm:py-8 lg:px-8">
-            <header className="mb-5 space-y-5 border-b border-emerald-100 pb-5 sm:mb-8 sm:pb-7">
+        <main className="mx-auto min-h-screen max-w-6xl px-3 py-5 font-sans text-slate-800 sm:px-6 sm:py-8">
+            {/* Header */}
+            <header className="mb-6 space-y-5 border-b border-emerald-100 pb-6">
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                    <div className="min-w-0">
-                        <span className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-emerald-800 sm:text-xs">
-                            <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                    <div>
+                        <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-bold uppercase text-emerald-800">
                             Spiritual Companion
                         </span>
 
-                        <h1 className="mt-3 text-2xl font-extrabold tracking-tight text-slate-950 sm:text-4xl">
+                        <h1 className="mt-3 text-3xl font-extrabold text-slate-950 sm:text-4xl">
                             Prayer Tracker
                         </h1>
 
-                        <p className="mt-2 max-w-xl text-sm leading-6 text-slate-500 sm:text-base">
-                            Build consistent habits and keep track of your daily and makeup
-                            prayers.
+                        <p className="mt-2 text-sm text-slate-500">
+                            Track your daily prayers and makeup prayers.
                         </p>
                     </div>
 
                     <button
-                        type="button"
                         onClick={() => void signOut()}
-                        className="inline-flex min-h-11 w-full items-center justify-center rounded-xl border border-rose-200 bg-rose-50 px-4 py-2.5 text-sm font-semibold text-rose-700 transition-colors hover:bg-rose-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400 sm:w-auto"
+                        className="min-h-11 rounded-xl border border-rose-200 bg-rose-50 px-4 py-2 font-semibold text-rose-700"
                     >
                         Sign out
                     </button>
                 </div>
 
-                <nav
-                    aria-label="Prayer tracker views"
-                    className="grid grid-cols-1 gap-2 rounded-2xl bg-slate-100 p-1.5 sm:grid-cols-3 sm:gap-1"
-                >
-                    {(
-                        [
-                            ["monthly", "Monthly View"],
-                            ["yearly", "Yearly Summary"],
-                            ["qada", "Qada Backlog"],
-                        ] as const
-                    ).map(([mode, label]) => (
+                {/* Navigation */}
+                <nav className="grid gap-2 rounded-2xl bg-slate-100 p-1.5 sm:grid-cols-3">
+                    {([
+                        ["monthly", "Monthly View"],
+                        ["yearly", "Yearly Summary"],
+                        ["qada", "Qada Backlog"],
+                    ] as const).map(([mode, label]) => (
                         <button
                             key={mode}
-                            type="button"
-                            aria-current={viewMode === mode ? "page" : undefined}
-                            onClick={() => setViewMode(mode)}
-                            className={`flex min-h-11 items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${viewMode === mode
-                                ? "bg-white text-emerald-800 shadow-sm"
-                                : "text-slate-600 hover:bg-white/60 hover:text-slate-900"
-                                }`}
+                            onClick={() => setView(mode)}
+                            aria-current={view === mode ? "page" : undefined}
+                            className={cx(
+                                "min-h-11 rounded-xl px-3 py-2.5 text-sm font-semibold",
+                                view === mode
+                                    ? "bg-white text-emerald-800 shadow-sm"
+                                    : "text-slate-600 hover:bg-white/60"
+                            )}
                         >
                             {label}
-                            {mode === "qada" && totalQadaCount > 0 && (
-                                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-bold text-emerald-800">
-                                    {totalQadaCount}
+
+                            {mode === "qada" && totalQada > 0 && (
+                                <span className="ml-2 rounded-full bg-emerald-100 px-2 py-0.5 text-xs">
+                                    {totalQada}
                                 </span>
                             )}
                         </button>
@@ -763,70 +587,64 @@ export default function PrayerTracker() {
                 </nav>
             </header>
 
-            <section className="min-w-0 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm shadow-emerald-950/3 sm:rounded-3xl sm:p-6 lg:p-8">
+            {/* Main content */}
+            <section className="min-w-0 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm sm:rounded-3xl sm:p-6 lg:p-8">
                 {error && (
                     <div
                         role="alert"
-                        className="mb-5 flex items-start gap-3 rounded-xl border border-rose-200 bg-rose-50 p-3.5 text-sm text-rose-800 sm:p-4"
+                        className="mb-5 flex gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800"
                     >
-                        <span className="shrink-0 font-bold" aria-hidden="true">
-                            !
-                        </span>
-                        <p className="min-w-0 flex-1 wrap-break-word">{error}</p>
+                        <p className="flex-1 break-words">{error}</p>
+
                         <button
-                            type="button"
                             onClick={() => setError("")}
                             aria-label="Dismiss error"
-                            className="shrink-0 rounded-md px-2 py-1 font-bold hover:bg-rose-100"
                         >
                             ×
                         </button>
                     </div>
                 )}
 
-                {viewMode === "monthly" && (
-                    <div className="space-y-5 sm:space-y-6">
-                        <div className="space-y-4 rounded-2xl border border-slate-200 bg-slate-50/70 p-3 sm:p-4">
+                {/* MONTHLY VIEW */}
+                {view === "monthly" && (
+                    <div className="space-y-6">
+                        {/* Month selector */}
+                        <div className="rounded-2xl border bg-slate-50 p-3 sm:p-4">
                             <div className="flex items-center justify-between gap-3">
                                 <button
-                                    type="button"
                                     aria-label="Previous month"
-                                    onClick={() => changeMonth(-1)}
-                                    className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-xl font-semibold text-slate-700 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                                    onClick={() =>
+                                        setMonth(new Date(year, monthIndex - 1, 1))
+                                    }
+                                    className="h-11 w-11 rounded-xl border bg-white text-xl"
                                 >
                                     ‹
                                 </button>
 
-                                <div className="min-w-0 text-center">
-                                    <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                                        Monthly tracker
-                                    </p>
-                                    <h2 className="mt-1 wrap-break-word text-lg font-bold text-slate-900 sm:text-xl">
-                                        {month.toLocaleDateString("en-US", {
-                                            month: "long",
-                                            year: "numeric",
-                                        })}
-                                    </h2>
-                                </div>
+                                <h2 className="text-center text-lg font-bold">
+                                    {MONTHS[monthIndex]} {year}
+                                </h2>
 
                                 <button
-                                    type="button"
                                     aria-label="Next month"
-                                    onClick={() => changeMonth(1)}
-                                    className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-xl font-semibold text-slate-700 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                                    onClick={() =>
+                                        setMonth(new Date(year, monthIndex + 1, 1))
+                                    }
+                                    className="h-11 w-11 rounded-xl border bg-white text-xl"
                                 >
                                     ›
                                 </button>
                             </div>
 
-                            <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
+                            <div className="mt-3 grid grid-cols-2 gap-2 sm:flex">
                                 <button
-                                    type="button"
                                     onClick={() => {
                                         const now = new Date();
-                                        setMonth(new Date(now.getFullYear(), now.getMonth(), 1));
+                                        setMonth(
+                                            new Date(now.getFullYear(), now.getMonth(), 1)
+                                        );
                                     }}
-                                    className="min-h-11 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2"
+                                    className="min-h-11 rounded-xl bg-emerald-600 px-4 py-2 font-semibold text-white"
                                 >
                                     Today
                                 </button>
@@ -834,13 +652,13 @@ export default function PrayerTracker() {
                                 <select
                                     aria-label="Select month"
                                     value={monthIndex}
-                                    onChange={(event) =>
-                                        setMonth(new Date(year, Number(event.target.value), 1))
+                                    onChange={e =>
+                                        setMonth(new Date(year, Number(e.target.value), 1))
                                     }
-                                    className="min-h-11 min-w-0 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 sm:flex-1"
+                                    className="min-h-11 min-w-0 rounded-xl border bg-white px-3"
                                 >
-                                    {MONTHS.map((name, index) => (
-                                        <option key={name} value={index}>
+                                    {MONTHS.map((name, i) => (
+                                        <option key={name} value={i}>
                                             {name}
                                         </option>
                                     ))}
@@ -849,368 +667,266 @@ export default function PrayerTracker() {
                                 <select
                                     aria-label="Select year"
                                     value={year}
-                                    onChange={(event) =>
+                                    onChange={e =>
                                         setMonth(
-                                            new Date(Number(event.target.value), monthIndex, 1),
+                                            new Date(Number(e.target.value), monthIndex, 1)
                                         )
                                     }
-                                    className="col-span-2 min-h-11 min-w-0 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 sm:col-span-1 sm:w-32"
+                                    className="col-span-2 min-h-11 rounded-xl border bg-white px-3 sm:col-span-1"
                                 >
-                                    {YEAR_OPTIONS.map((optionYear) => (
-                                        <option key={optionYear} value={optionYear}>
-                                            {optionYear}
-                                        </option>
-                                    ))}
-                                    {!YEAR_OPTIONS.includes(year) && (
-                                        <option value={year}>{year}</option>
-                                    )}
+                                    {[...new Set([...YEARS, year])]
+                                        .sort((a, b) => a - b)
+                                        .map(y => (
+                                            <option key={y} value={y}>
+                                                {y}
+                                            </option>
+                                        ))}
                                 </select>
                             </div>
                         </div>
 
                         {loading ? (
-                            <LoadingState message="Loading your prayer records..." />
+                            <Loading message="Loading prayer records..." />
                         ) : (
                             <>
-                                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                                    <StatCard
+                                {/* Prayer statistics */}
+                                <div className="grid gap-3 sm:grid-cols-2">
+                                    <Stat
                                         label="Area of focus"
-                                        value={monthlyStats.mostMissed.label}
-                                        description={`${100 - monthlyStats.mostMissed.pct}% not recorded as completed during the selected days.`}
-                                        tone="rose"
+                                        value={
+                                            PRAYERS[
+                                                monthly.counts.indexOf(Math.min(...monthly.counts))
+                                            ].label
+                                        }
+                                        description={`${monthly.elapsedDays
+                                            ? Math.round(
+                                                (1 -
+                                                    Math.min(...monthly.counts) /
+                                                    monthly.elapsedDays) *
+                                                100
+                                            )
+                                            : 0
+                                            }% not recorded as completed.`}
+                                        rose
                                     />
-                                    <StatCard
+
+                                    <Stat
                                         label="Strongest habit"
-                                        value={monthlyStats.mostCompleted.label}
-                                        description={`${monthlyStats.mostCompleted.pct}% completion consistency during the selected days.`}
+                                        value={
+                                            PRAYERS[
+                                                monthly.counts.indexOf(Math.max(...monthly.counts))
+                                            ].label
+                                        }
+                                        description="Your most frequently completed prayer."
                                     />
                                 </div>
 
-                                <div className="space-y-4 rounded-2xl border border-slate-200 bg-slate-50/70 p-4 sm:p-5">
-                                    <div className="flex items-start justify-between gap-3">
-                                        <div className="min-w-0">
-                                            <h3 className="text-sm font-bold text-slate-800 sm:text-base">
-                                                Monthly completion
-                                            </h3>
-                                            <p className="mt-1 text-xs leading-5 text-slate-500">
-                                                Based on elapsed days in the selected month.
+                                {/* Monthly progress */}
+                                <div className="space-y-4 rounded-2xl border bg-slate-50/70 p-4 sm:p-5">
+                                    <div className="flex items-center justify-between gap-3">
+                                        <div>
+                                            <h3 className="font-bold">Monthly completion</h3>
+                                            <p className="mt-1 text-xs text-slate-500">
+                                                Based on elapsed days.
                                             </p>
                                         </div>
-                                        <span className="shrink-0 text-2xl font-extrabold text-emerald-700">
-                                            {monthlyStats.percentage}%
+
+                                        <span className="text-2xl font-extrabold text-emerald-700">
+                                            {monthly.percentage}%
                                         </span>
                                     </div>
 
-                                    <ProgressBar value={monthlyStats.percentage} />
+                                    <Progress value={monthly.percentage} />
 
-                                    <p className="text-xs leading-5 text-slate-500">
-                                        {monthlyStats.totalChecked} of {monthlyStats.totalPossible}{" "}
-                                        prayers completed across {monthlyStats.daysToCount} days.
+                                    <p className="text-xs text-slate-500">
+                                        {monthly.checked} of {monthly.possible} prayers across{" "}
+                                        {monthly.elapsedDays} days.
                                     </p>
 
-                                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                    <div className="grid gap-2 sm:grid-cols-2">
                                         <button
-                                            type="button"
-                                            disabled={bulkActionLoading || !userId}
-                                            onClick={() => void handleBulkAction(true)}
-                                            className="min-h-11 rounded-xl bg-emerald-600 px-3 py-2.5 text-sm font-bold text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2"
+                                            disabled={bulkLoading}
+                                            onClick={() => void updateMonth(true)}
+                                            className="min-h-11 rounded-xl bg-emerald-600 px-3 py-2 font-bold text-white disabled:opacity-50"
                                         >
-                                            {bulkActionLoading
-                                                ? "Saving changes..."
-                                                : "Mark entire month done"}
+                                            {bulkLoading ? "Saving..." : "Mark entire month done"}
                                         </button>
+
                                         <button
-                                            type="button"
-                                            disabled={bulkActionLoading || !userId}
-                                            onClick={() => void handleBulkAction(false)}
-                                            className="min-h-11 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-bold text-rose-700 transition-colors hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400"
+                                            disabled={bulkLoading}
+                                            onClick={() => void updateMonth(false)}
+                                            className="min-h-11 rounded-xl border bg-white px-3 py-2 font-bold text-rose-700 disabled:opacity-50"
                                         >
                                             Clear entire month
                                         </button>
                                     </div>
                                 </div>
 
-                                <div className="space-y-3 md:hidden">
-                                    <div>
-                                        <h3 className="text-base font-bold text-slate-900">
-                                            Daily prayers
-                                        </h3>
-                                        <p className="mt-1 text-xs leading-5 text-slate-500">
-                                            Select each prayer as you complete it.
-                                        </p>
-                                    </div>
+                                {/* Daily prayer checklist */}
+                                <div className="overflow-x-auto rounded-2xl border">
+                                    <table className="w-full min-w-[680px] text-center">
+                                        <thead className="bg-slate-50">
+                                            <tr>
+                                                <th className="sticky left-0 bg-slate-50 px-3 py-4 text-left text-xs">
+                                                    Day
+                                                </th>
 
-                                    {Array.from(
-                                        { length: daysInMonth },
-                                        (_, index) => index + 1,
-                                    ).map((day) => {
-                                        const date = localDate(year, monthIndex, day);
-                                        const row = rows[date] ?? emptyDay(userId, date);
-                                        const count = completedCount(row);
-                                        const isToday = date === today;
-                                        const isComplete = count === prayers.length;
-                                        const dayDate = new Date(year, monthIndex, day);
+                                                {PRAYERS.map(prayer => (
+                                                    <th
+                                                        key={prayer.key}
+                                                        className="px-3 py-4 text-xs"
+                                                    >
+                                                        {prayer.label}
 
-                                        return (
-                                            <article
-                                                key={date}
-                                                className={`min-w-0 rounded-2xl border p-3.5 transition-colors ${isToday
-                                                    ? "border-emerald-300 bg-emerald-50/50"
-                                                    : "border-slate-200 bg-white"
-                                                    }`}
-                                            >
-                                                <div className="mb-3 flex items-center justify-between gap-3">
-                                                    <div className="flex min-w-0 items-center gap-3">
                                                         <span
-                                                            className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-sm font-extrabold ${isToday
-                                                                ? "bg-emerald-600 text-white"
-                                                                : "bg-slate-100 text-slate-700"
-                                                                }`}
+                                                            lang="ar"
+                                                            dir="rtl"
+                                                            className="mt-1 block text-sm font-normal text-emerald-700"
                                                         >
-                                                            {day}
+                                                            {prayer.arabic}
                                                         </span>
-                                                        <div className="min-w-0">
-                                                            <p className="text-sm font-bold text-slate-900">
-                                                                {dayDate.toLocaleDateString("en-US", {
-                                                                    weekday: "long",
-                                                                })}
-                                                            </p>
-                                                            <p className="text-xs text-slate-500">
-                                                                {dayDate.toLocaleDateString("en-US", {
-                                                                    month: "short",
-                                                                    day: "numeric",
-                                                                })}
-                                                                {isToday ? " · Today" : ""}
-                                                            </p>
-                                                        </div>
-                                                    </div>
-                                                    <span
-                                                        className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-bold ${isComplete
-                                                            ? "bg-emerald-100 text-emerald-800"
-                                                            : count > 0
-                                                                ? "bg-amber-100 text-amber-800"
-                                                                : "bg-slate-100 text-slate-600"
-                                                            }`}
-                                                    >
-                                                        {count}/6
-                                                    </span>
-                                                </div>
-
-                                                <ProgressBar value={Math.round((count / 6) * 100)} />
-
-                                                <div className="mt-3 grid grid-cols-1 gap-2 min-[380px]:grid-cols-2">
-                                                    {prayers.map((prayer) => (
-                                                        <PrayerToggle
-                                                            key={prayer.key}
-                                                            prayer={prayer}
-                                                            checked={row[prayer.key]}
-                                                            disabled={
-                                                                !userId ||
-                                                                Boolean(saving[date]) ||
-                                                                bulkActionLoading
-                                                            }
-                                                            onChange={(checked) =>
-                                                                void togglePrayer(date, prayer.key, checked)
-                                                            }
-                                                        />
-                                                    ))}
-                                                </div>
-
-                                                {saving[date] && (
-                                                    <p
-                                                        className="mt-2 text-right text-xs text-slate-400"
-                                                        role="status"
-                                                    >
-                                                        Saving...
-                                                    </p>
-                                                )}
-                                            </article>
-                                        );
-                                    })}
-                                </div>
-
-                                <div className="hidden overflow-hidden rounded-2xl border border-slate-200 md:block">
-                                    <div className="overflow-x-auto">
-                                        <table className="w-full min-w-190 border-collapse text-center">
-                                            <thead>
-                                                <tr className="border-b border-slate-200 bg-slate-50">
-                                                    <th
-                                                        scope="col"
-                                                        className="sticky left-0 z-10 bg-slate-50 px-4 py-4 text-left text-xs font-bold uppercase tracking-wider text-slate-600"
-                                                    >
-                                                        Day
                                                     </th>
-                                                    {prayers.map((prayer) => (
-                                                        <th
-                                                            key={prayer.key}
-                                                            scope="col"
-                                                            className="px-3 py-4 text-xs font-bold uppercase tracking-wider text-slate-700"
-                                                        >
-                                                            <span className="block">{prayer.label}</span>
-                                                            <span
-                                                                lang="ar"
-                                                                dir="rtl"
-                                                                className="mt-1 block text-sm font-normal text-emerald-700"
-                                                            >
-                                                                {prayer.arabic}
-                                                            </span>
+                                                ))}
+
+                                                <th className="px-3 py-4 text-xs">
+                                                    Progress
+                                                </th>
+                                            </tr>
+                                        </thead>
+
+                                        <tbody className="divide-y divide-slate-100">
+                                            {Array.from(
+                                                { length: days },
+                                                (_, i) => i + 1
+                                            ).map(day => {
+                                                const date = dayDate(year, monthIndex, day);
+                                                const row =
+                                                    rows[date] ?? emptyDay(userId, date);
+                                                const count = countPrayers(row);
+                                                const isToday = date === today;
+
+                                                return (
+                                                    <tr
+                                                        key={date}
+                                                        className={
+                                                            isToday
+                                                                ? "bg-emerald-50/60"
+                                                                : "bg-white"
+                                                        }
+                                                    >
+                                                        <th className="sticky left-0 bg-inherit px-3 py-3 text-left text-sm">
+                                                            {day}{" "}
+
+                                                            {isToday && (
+                                                                <span className="text-xs text-emerald-700">
+                                                                    Today
+                                                                </span>
+                                                            )}
                                                         </th>
-                                                    ))}
-                                                    <th
-                                                        scope="col"
-                                                        className="px-4 py-4 text-xs font-bold uppercase tracking-wider text-slate-600"
-                                                    >
-                                                        Progress
-                                                    </th>
-                                                </tr>
-                                            </thead>
 
-                                            <tbody className="divide-y divide-slate-100">
-                                                {Array.from(
-                                                    { length: daysInMonth },
-                                                    (_, index) => index + 1,
-                                                ).map((day) => {
-                                                    const date = localDate(year, monthIndex, day);
-                                                    const row = rows[date] ?? emptyDay(userId, date);
-                                                    const count = completedCount(row);
-                                                    const isToday = date === today;
+                                                        {PRAYERS.map(({ key, label }) => (
+                                                            <td key={key} className="px-3 py-3">
+                                                                <input
+                                                                    type="checkbox"
+                                                                    aria-label={`${label}, ${date}`}
+                                                                    checked={row[key]}
+                                                                    disabled={
+                                                                        Boolean(saving[date]) || bulkLoading
+                                                                    }
+                                                                    onChange={e =>
+                                                                        void togglePrayer(
+                                                                            date,
+                                                                            key,
+                                                                            e.target.checked
+                                                                        )
+                                                                    }
+                                                                    className="h-5 w-5 accent-emerald-600"
+                                                                />
+                                                            </td>
+                                                        ))}
 
-                                                    return (
-                                                        <tr
-                                                            key={date}
-                                                            className={`transition-colors hover:bg-slate-50 ${isToday ? "bg-emerald-50/50" : "bg-white"
-                                                                }`}
-                                                        >
-                                                            <th
-                                                                scope="row"
-                                                                className={`sticky left-0 z-10 px-4 py-3 text-left text-sm font-semibold ${isToday
-                                                                    ? "bg-emerald-50 text-emerald-900"
-                                                                    : "bg-white text-slate-800"
-                                                                    }`}
-                                                            >
-                                                                <div className="flex items-center gap-2">
-                                                                    <span
-                                                                        className={`flex h-8 w-8 items-center justify-center rounded-lg text-xs font-bold ${isToday
-                                                                            ? "bg-emerald-600 text-white"
-                                                                            : "bg-slate-100 text-slate-700"
-                                                                            }`}
-                                                                    >
-                                                                        {day}
-                                                                    </span>
-                                                                    {isToday && (
-                                                                        <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700">
-                                                                            Today
-                                                                        </span>
-                                                                    )}
-                                                                </div>
-                                                            </th>
-
-                                                            {prayers.map((prayer) => (
-                                                                <td key={prayer.key} className="px-3 py-3">
-                                                                    <input
-                                                                        type="checkbox"
-                                                                        aria-label={`${prayer.label}, ${date}`}
-                                                                        checked={row[prayer.key]}
-                                                                        disabled={
-                                                                            !userId ||
-                                                                            Boolean(saving[date]) ||
-                                                                            bulkActionLoading
-                                                                        }
-                                                                        onChange={(event) =>
-                                                                            void togglePrayer(
-                                                                                date,
-                                                                                prayer.key,
-                                                                                event.target.checked,
-                                                                            )
-                                                                        }
-                                                                        className="h-5 w-5 cursor-pointer rounded border-slate-300 accent-emerald-600 focus:ring-emerald-500 disabled:cursor-wait disabled:opacity-50"
-                                                                    />
-                                                                </td>
-                                                            ))}
-
-                                                            <td className="px-4 py-3">
-                                                                <span
-                                                                    className={`inline-flex rounded-full px-2.5 py-1 text-xs font-bold ${count === prayers.length
+                                                        <td className="px-3 py-3">
+                                                            <span
+                                                                className={cx(
+                                                                    "rounded-full px-2.5 py-1 text-xs font-bold",
+                                                                    count === PRAYERS.length
                                                                         ? "bg-emerald-100 text-emerald-800"
-                                                                        : count > 0
+                                                                        : count
                                                                             ? "bg-amber-100 text-amber-800"
                                                                             : "bg-slate-100 text-slate-600"
-                                                                        }`}
-                                                                >
-                                                                    {count}/6
-                                                                </span>
-                                                            </td>
-                                                        </tr>
-                                                    );
-                                                })}
-                                            </tbody>
-                                        </table>
-                                    </div>
+                                                                )}
+                                                            >
+                                                                {count}/{PRAYERS.length}
+                                                            </span>
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
                                 </div>
                             </>
                         )}
                     </div>
                 )}
 
-                {viewMode === "yearly" && (
-                    <div className="space-y-5 sm:space-y-6">
-                        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-                            <SectionHeading
+
+                {/* YEARLY SUMMARY */}
+                {view === "yearly" && (
+                    <div className="space-y-5">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                            <Heading
                                 title={`Yearly overview · ${year}`}
-                                description="Review your prayer completion across the year."
+                                description="Review prayer completion throughout the year."
                             />
+
                             <select
                                 aria-label="Select summary year"
                                 value={year}
-                                onChange={(event) =>
-                                    setMonth(
-                                        new Date(Number(event.target.value), monthIndex, 1),
-                                    )
+                                onChange={e =>
+                                    setMonth(new Date(Number(e.target.value), monthIndex, 1))
                                 }
-                                className="min-h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 sm:w-36"
+                                className="min-h-11 rounded-xl border bg-white px-3"
                             >
-                                {YEAR_OPTIONS.map((optionYear) => (
-                                    <option key={optionYear} value={optionYear}>
-                                        {optionYear}
-                                    </option>
-                                ))}
-                                {!YEAR_OPTIONS.includes(year) && (
-                                    <option value={year}>{year}</option>
-                                )}
+                                {[...new Set([...YEARS, year])]
+                                    .sort((a, b) => a - b)
+                                    .map(y => (
+                                        <option key={y} value={y}>
+                                            {y}
+                                        </option>
+                                    ))}
                             </select>
                         </div>
 
-                        {yearlyLoading ? (
-                            <LoadingState message="Loading your yearly summary..." />
+                        {yearLoading ? (
+                            <Loading message="Loading yearly summary..." />
                         ) : (
-                            <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
-                                {yearlyStats.map((item) => (
+                            <div className="grid gap-3 min-[420px]:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                                {yearly.map(item => (
                                     <article
-                                        key={item.monthNumber}
-                                        className="min-w-0 rounded-2xl border border-slate-200 bg-linear-to-b from-white to-slate-50/70 p-4 transition-shadow hover:shadow-md sm:p-5"
+                                        key={item.month}
+                                        className="rounded-2xl border p-4 sm:p-5"
                                     >
                                         <div className="mb-4 flex items-center justify-between gap-2">
-                                            <h3 className="min-w-0 font-bold text-slate-900">
-                                                {item.name}
-                                            </h3>
-                                            <span className="shrink-0 rounded-full border border-emerald-100 bg-emerald-50 px-2.5 py-1 text-xs font-extrabold text-emerald-800">
+                                            <h3 className="font-bold">{item.name}</h3>
+
+                                            <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-800">
                                                 {item.percentage}%
                                             </span>
                                         </div>
 
-                                        <ProgressBar value={item.percentage} />
+                                        <Progress value={item.percentage} />
 
-                                        <p className="mt-3 text-xs leading-5 text-slate-500">
+                                        <p className="mt-3 text-xs text-slate-500">
                                             {item.checked} of {item.possible} prayers completed
                                         </p>
 
                                         <button
-                                            type="button"
                                             onClick={() => {
-                                                setMonth(new Date(year, item.monthNumber, 1));
-                                                setViewMode("monthly");
+                                                setMonth(new Date(year, item.month, 1));
+                                                setView("monthly");
                                             }}
-                                            className="mt-4 min-h-10 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:border-emerald-300 hover:text-emerald-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                                            className="mt-4 min-h-10 w-full rounded-xl border px-3 py-2 text-xs font-bold"
                                         >
                                             View month
                                         </button>
@@ -1221,90 +937,82 @@ export default function PrayerTracker() {
                     </div>
                 )}
 
-                {viewMode === "qada" && (
-                    <div className="space-y-5 sm:space-y-6">
-                        <div className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-slate-50/70 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
-                            <SectionHeading
+                {/* QADA BACKLOG */}
+                {view === "qada" && (
+                    <div className="space-y-5">
+                        <div className="flex flex-col gap-4 rounded-2xl border bg-slate-50/70 p-4 sm:flex-row sm:items-center sm:justify-between">
+                            <Heading
                                 title="Qada prayer backlog"
-                                description="Keep track of missed prayers and update your counts as you make them up."
+                                description="Track missed prayers and reduce the count as you make them up."
                             />
 
-                            <div className="rounded-xl border border-slate-200 bg-white p-4 sm:min-w-44">
-                                <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                            <div className="rounded-xl border bg-white p-4">
+                                <p className="text-xs font-bold uppercase text-slate-400">
                                     Total remaining
                                 </p>
+
                                 <p className="mt-1 text-2xl font-extrabold text-emerald-800">
-                                    {totalQadaCount}
-                                    <span className="ml-1.5 text-sm font-semibold text-slate-500">
-                                        prayers
-                                    </span>
+                                    {totalQada} <span className="text-sm">prayers</span>
                                 </p>
                             </div>
                         </div>
 
-                        {qadaLoading || !qadaData ? (
-                            <LoadingState message="Loading your Qada backlog..." />
+                        {qadaLoading || !qada ? (
+                            <Loading message="Loading Qada backlog..." />
                         ) : (
-                            <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 sm:gap-4 lg:grid-cols-3">
-                                {prayers.map((prayer) => {
-                                    const count = qadaData[prayer.key];
+                            <div className="grid gap-3 min-[420px]:grid-cols-2 lg:grid-cols-3">
+                                {PRAYERS.map(({ key, label, arabic }) => (
+                                    <article
+                                        key={key}
+                                        className="flex flex-col justify-between gap-5 rounded-2xl border p-4 sm:p-5"
+                                    >
+                                        <div className="flex items-center justify-between gap-3">
+                                            <div>
+                                                <h3 className="font-bold">{label}</h3>
 
-                                    return (
-                                        <article
-                                            key={prayer.key}
-                                            className="flex min-w-0 flex-col justify-between gap-5 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition-shadow hover:shadow-md sm:p-5"
-                                        >
-                                            <div className="flex items-center justify-between gap-3">
-                                                <div className="min-w-0">
-                                                    <h3 className="font-bold text-slate-900">
-                                                        {prayer.label}
-                                                    </h3>
-                                                    <p
-                                                        lang="ar"
-                                                        dir="rtl"
-                                                        className="mt-1 text-sm text-emerald-700"
-                                                    >
-                                                        {prayer.arabic}
-                                                    </p>
-                                                </div>
-                                                <span className="flex h-12 min-w-12 shrink-0 items-center justify-center rounded-xl border border-emerald-100 bg-emerald-50 px-3 text-xl font-extrabold text-emerald-800">
-                                                    {count}
-                                                </span>
+                                                <p
+                                                    lang="ar"
+                                                    dir="rtl"
+                                                    className="mt-1 text-sm text-emerald-700"
+                                                >
+                                                    {arabic}
+                                                </p>
                                             </div>
 
-                                            <div className="grid grid-cols-2 gap-2 border-t border-slate-100 pt-4">
-                                                <button
-                                                    type="button"
-                                                    disabled={qadaSaving || count <= 0}
-                                                    onClick={() =>
-                                                        void updateQadaCount(prayer.key, -1)
-                                                    }
-                                                    className="min-h-11 rounded-xl border border-slate-200 bg-slate-50 px-2 py-2 text-xs font-bold text-slate-700 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-                                                >
-                                                    −1 Made up
-                                                </button>
-                                                <button
-                                                    type="button"
-                                                    disabled={qadaSaving}
-                                                    onClick={() =>
-                                                        void updateQadaCount(prayer.key, 1)
-                                                    }
-                                                    className="min-h-11 rounded-xl bg-emerald-600 px-2 py-2 text-xs font-bold text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-                                                >
-                                                    +1 Missed
-                                                </button>
-                                            </div>
-                                        </article>
-                                    );
-                                })}
+                                            <span className="flex h-12 min-w-12 items-center justify-center rounded-xl bg-emerald-50 px-3 text-xl font-extrabold text-emerald-800">
+                                                {qada[key]}
+                                            </span>
+                                        </div>
+
+                                        <div className="grid grid-cols-2 gap-2 border-t pt-4">
+                                            <button
+                                                disabled={qadaSaving || qada[key] === 0}
+                                                onClick={() => void updateQada(key, -1)}
+                                                className="min-h-11 rounded-xl border bg-slate-50 px-2 py-2 text-xs font-bold disabled:opacity-40"
+                                            >
+                                                −1 Made up
+                                            </button>
+
+                                            <button
+                                                disabled={qadaSaving}
+                                                onClick={() => void updateQada(key, 1)}
+                                                className="min-h-11 rounded-xl bg-emerald-600 px-2 py-2 text-xs font-bold text-white disabled:opacity-40"
+                                            >
+                                                +1 Missed
+                                            </button>
+                                        </div>
+                                    </article>
+                                ))}
                             </div>
                         )}
                     </div>
                 )}
             </section>
 
-            <footer className="px-2 py-7 text-center text-xs leading-5 text-slate-400 sm:py-9">
+            {/* FOOTER */}
+            <footer className="py-8 text-center text-xs leading-5 text-slate-400">
                 Your prayer records are synced to your account.
+
                 <span className="mt-1 block">
                     May your consistency grow one prayer at a time.
                 </span>

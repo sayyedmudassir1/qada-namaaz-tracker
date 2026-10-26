@@ -1,10 +1,13 @@
 
+import { connection } from "next/server";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import PrayerTracker from "./prayer-tracker";
 
 export default async function TrackerContent() {
+    await connection();
+
     const cookieStore = await cookies();
     const supabase = createClient(cookieStore);
 
